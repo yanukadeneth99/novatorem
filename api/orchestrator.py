@@ -654,13 +654,12 @@ def make_promo_svg(background_color: str, border_color: str) -> str:
             f'<path d="{tri}" fill="#000000"/>'
         )
 
-    # Vertical positions for the three text rows. Tweaked so the artist
-    # name sits above center, status text below it, and the CTA pinned to
-    # the bottom-right corner.
+    # Vertical positions for the two text rows. The artist name sits above
+    # center; the status line sits below it. (The CTA pill that used to be
+    # bottom-right was removed — README has its own "Listen on Spotify"
+    # badge underneath, so a duplicate inside the widget was redundant.)
     name_y = height / 2 - 14
     status_y = height / 2 + 8
-    cta_y = height - 18
-    cta_x = width - svg_config.widget_padding_right - 12
 
     # Bottom-edge gradient sweep: purple → spotify green. Adds visual
     # interest without overpowering the content. Drawn as a thin bar
@@ -692,20 +691,14 @@ def make_promo_svg(background_color: str, border_color: str) -> str:
         font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
         font-size="20" font-weight="800" fill="{text_main}">{artist_name}</text>
 
-  <!-- Status line. "Currently chilling" reads more positive than "Not playing". -->
+  <!-- Status line. "Currently chilling" reads more positive than "Not playing".
+       The CTA pill that used to sit bottom-right was removed because the README
+       already has a separate "Listen on Spotify" badge underneath this widget —
+       two of the same CTA in adjacent space looked redundant. -->
   <text x="{text_x}" y="{status_y}"
         font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
         font-size="12" font-weight="500" fill="{text_muted}">Currently chilling · explore my music below</text>
 
-  <!-- CTA pill: Spotify-green filled rounded rect with white play arrow + label.
-       Pinned to bottom-right so the eye lands on it after reading the name. -->
-  <g transform="translate({cta_x - 130}, {cta_y - 22})">
-    <rect width="142" height="28" rx="14" fill="{spotify_green}"/>
-    <path d="M 14,8 L 14,20 L 24,14 Z" fill="#000000"/>
-    <text x="32" y="19"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
-          font-size="12" font-weight="700" fill="#000000">Listen on Spotify</text>
-  </g>
 </svg>"""
 
 
@@ -816,22 +809,44 @@ def preview_page() -> Response:
 
 @app.route("/redirect")
 def redirect_to_song() -> Response:
-    """Redirect to the currently playing song."""
-    # Default fallback URL (e.g., project repository)
-    fallback_url = "https://github.com/novatorem/novatorem"
+    """
+    Smart redirect: if the user is actively playing a track, send to that
+    track's Spotify URL. Otherwise send to the artist profile (or a custom
+    fallback URL via PROMO_FALLBACK_URL).
+
+    This makes the "Listen on Spotify" click in the README contextual —
+    visitors land on the exact thing being played when something's live,
+    and on the artist profile when it isn't.
+    """
+    # Build fallback URL. Priority order:
+    #   1. PROMO_FALLBACK_URL env var (explicit override for any platform)
+    #   2. Artist URL derived from PROMO_ARTIST_ID
+    #   3. Novatorem repo (last-resort default for unconfigured forks)
+    artist_id = os.getenv("PROMO_ARTIST_ID", "").strip()
+    fallback_url = (
+        os.getenv("PROMO_FALLBACK_URL", "").strip()
+        or (f"https://open.spotify.com/artist/{artist_id}" if artist_id else "")
+        or "https://github.com/novatorem/novatorem"
+    )
 
     try:
         service_name, service = get_active_service()
         track_data = service.get_now_playing()
-        track_url = track_data.get("track_url")
-        
-        if track_url:
-            return redirect(track_url)
+        # Only redirect to the track when the user is *actively* playing —
+        # for not-playing fallbacks ("Recently played") the track_url would
+        # be stale, so we prefer sending viewers to the artist profile.
+        if track_data.get("is_playing") and track_data.get("track_url"):
+            resp = redirect(track_data["track_url"])
+            # Don't cache the redirect — track changes constantly. no-store
+            # tells browsers and proxies "always re-check this URL."
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
     except Exception:
-        # In case of any error (service not configured, API error), use fallback
-        pass
+        pass  # Fall through to fallback on any failure
 
-    return redirect(fallback_url)
+    resp = redirect(fallback_url)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/health")
