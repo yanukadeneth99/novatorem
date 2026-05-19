@@ -626,7 +626,14 @@ def catch_all(path: str) -> Response:
     svg = make_svg(track_data, background_color, border_color, background_type, show_status, is_compact)
 
     resp = Response(svg, mimetype="image/svg+xml")
-    resp.headers["Cache-Control"] = "s-maxage=1"
+    # Edge-cache the rendered SVG to absorb refresh bursts and protect the
+    # upstream Spotify rate limit. Vercel's CDN serves the cached widget for
+    # s-maxage seconds, then keeps serving it stale for stale-while-revalidate
+    # while it refreshes in the background — so the widget never visibly slows
+    # down, and 1000 viewers in the same window cost 1 Spotify call instead of
+    # 1000. Trade-off: track changes appear up to ~30s late on the README,
+    # which is fine for a profile widget.
+    resp.headers["Cache-Control"] = "public, s-maxage=30, stale-while-revalidate=60"
 
     return resp
 
