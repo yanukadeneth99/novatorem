@@ -98,12 +98,14 @@ class SpotifyTokenManager:
         headers = {"Authorization": f"Basic {self._get_auth_header()}"}
 
         try:
+            # TLS verification kept ON: this POST carries the refresh_token and
+            # Basic client_id:client_secret — disabling cert checks here would
+            # let a MITM steal long-lived Spotify credentials.
             response = requests.post(
                 spotify_config.token_url,
                 data=data,
                 headers=headers,
                 timeout=10,
-                verify=False,
             )
             response.raise_for_status()
             result = response.json()
@@ -170,7 +172,10 @@ def _api_get(url: str, retry_on_auth_error: bool = True) -> dict[str, Any]:
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
-        response = requests.get(url, headers=headers, timeout=10, verify=False)
+        # TLS verification kept ON: the Authorization header carries the
+        # short-lived bearer token; verifying the cert prevents it from being
+        # captured by a MITM impersonating api.spotify.com.
+        response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code == 401 and retry_on_auth_error:
             # Token expired, refresh and retry once
