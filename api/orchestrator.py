@@ -564,6 +564,77 @@ def get_active_service() -> Tuple[str, Any]:
 # ============================================================================
 
 
+def make_promo_svg(background_color: str, border_color: str) -> str:
+    """
+    Render a Spotify-branded "not playing" promo card.
+
+    Shown when the user isn't currently streaming — instead of falling back to
+    a stale "Recently played" widget that looks like an active track, we render
+    a clean CTA pointing viewers at the artist profile. Dimensions match the
+    regular widget so it slots in identically inside the README's image slot.
+
+    The card is intentionally simple SVG (no album-art fetch, no colour-thief)
+    so it renders fast and stays light — every visit when the user isn't
+    listening goes through this code path.
+    """
+    width = svg_config.width
+    height = svg_config.height
+    radius = svg_config.border_radius
+
+    # Spotify brand colours, used as accent only — main background respects the
+    # caller-provided color so the card still blends with the README theme.
+    spotify_green = "#1DB954"
+    text_main = "#E6EDF3"
+    text_muted = "#9CA3AF"
+
+    # Geometry: a circular play button on the left (avatar-sized), then two
+    # lines of text + a faux CTA button on the right.
+    art_size = svg_config.album_art_size
+    art_cx = svg_config.widget_padding_left + svg_config.widget_border_width + art_size / 2
+    art_cy = height / 2
+    play_r = art_size / 2 - 4
+
+    text_x = (
+        svg_config.widget_padding_left
+        + svg_config.widget_border_width
+        + art_size
+        + svg_config.art_content_gap
+    )
+    title_y = height / 2 - 8
+    subtitle_y = height / 2 + 16
+
+    # Triangular play glyph inscribed inside the green circle.
+    tri_offset = play_r * 0.45
+    tri = (
+        f"M {art_cx - tri_offset * 0.6},{art_cy - tri_offset} "
+        f"L {art_cx - tri_offset * 0.6},{art_cy + tri_offset} "
+        f"L {art_cx + tri_offset},{art_cy} Z"
+    )
+
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Listen on Spotify">
+  <!-- Card background: caller-provided colour with the Spotify-green border
+       to telegraph the destination platform. -->
+  <rect x="{svg_config.widget_border_width / 2}" y="{svg_config.widget_border_width / 2}"
+        width="{width - svg_config.widget_border_width}" height="{height - svg_config.widget_border_width}"
+        rx="{radius}" ry="{radius}"
+        fill="#{background_color}" stroke="{spotify_green}" stroke-width="{svg_config.widget_border_width}"/>
+
+  <!-- Play button: green circle + black triangle. Visually identical to
+       Spotify's play affordance, instantly recognizable. -->
+  <circle cx="{art_cx}" cy="{art_cy}" r="{play_r}" fill="{spotify_green}"/>
+  <path d="{tri}" fill="#000000"/>
+
+  <!-- Main copy. Avoid "Not currently playing" framing — keeps it as a
+       positive CTA ("Listen") rather than a status report. -->
+  <text x="{text_x}" y="{title_y}"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="18" font-weight="700" fill="{text_main}">Currently chilling</text>
+  <text x="{text_x}" y="{subtitle_y}"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="13" font-weight="500" fill="{text_muted}">Tap to listen to my music on Spotify  →</text>
+</svg>"""
+
+
 def make_error_svg(message: str, status_code: int = 500) -> Response:
     """
     Generate an error SVG response.
@@ -623,7 +694,16 @@ def catch_all(path: str) -> Response:
     except Exception as e:
         return make_error_svg(f"Error: {str(e)}", 500)
 
-    svg = make_svg(track_data, background_color, border_color, background_type, show_status, is_compact)
+    # If nothing is currently playing, render a "promo" card instead of the
+    # misleading "Recently played:" track widget — that defaulted UI made the
+    # README look like a song was active when it wasn't. The promo card is a
+    # clean Spotify-branded CTA pointing the viewer at the artist profile.
+    # Honor ?promo=off to opt out (e.g. on the /preview route).
+    promo_opt_out = request.args.get("promo", "on").lower() in ("off", "false", "0", "no")
+    if not track_data.get("is_playing") and not promo_opt_out:
+        svg = make_promo_svg(background_color, border_color)
+    else:
+        svg = make_svg(track_data, background_color, border_color, background_type, show_status, is_compact)
 
     resp = Response(svg, mimetype="image/svg+xml")
     # Edge-cache the rendered SVG to absorb refresh bursts and protect the
