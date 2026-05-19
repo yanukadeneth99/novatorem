@@ -612,7 +612,10 @@ def make_promo_svg(background_color: str, border_color: str) -> str:
     # Fetch artist info — env-var driven so the fork stays reusable.
     artist_id = os.getenv("PROMO_ARTIST_ID", "").strip()
     artist = spotify_mod.get_artist(artist_id) if artist_id else None
-    artist_name = (artist or {}).get("name") or "Yanuka Deneth"
+    # Fallback to "YASHURA" rather than a real name — that's the brand identity
+    # used across the README and other widgets. PROMO_ARTIST_NAME env var lets
+    # forks override without code changes.
+    artist_name = (artist or {}).get("name") or os.getenv("PROMO_ARTIST_NAME", "YASHURA")
     image_url = (artist or {}).get("image_url")
 
     # Try to inline the artist image as base64. If anything goes wrong,
@@ -777,14 +780,19 @@ def catch_all(path: str) -> Response:
         svg = make_svg(track_data, background_color, border_color, background_type, show_status, is_compact)
 
     resp = Response(svg, mimetype="image/svg+xml")
-    # Edge-cache the rendered SVG to absorb refresh bursts and protect the
-    # upstream Spotify rate limit. Vercel's CDN serves the cached widget for
-    # s-maxage seconds, then keeps serving it stale for stale-while-revalidate
-    # while it refreshes in the background — so the widget never visibly slows
-    # down, and 1000 viewers in the same window cost 1 Spotify call instead of
-    # 1000. Trade-off: track changes appear up to ~30s late on the README,
-    # which is fine for a profile widget.
-    resp.headers["Cache-Control"] = "public, s-maxage=30, stale-while-revalidate=60"
+    # Edge-cache for 30s to absorb refresh bursts + protect Spotify rate limit.
+    # Three layered headers because Vercel's Python adapter is inconsistent:
+    #   - Cache-Control with both max-age and s-maxage covers browsers and
+    #     shared/CDN proxies (camo respects this)
+    #   - CDN-Cache-Control is the Vercel-specific override for its edge layer
+    #     — without it, Vercel can fall back to its default (effectively
+    #     "cache forever") when it sees ambiguous Cache-Control values
+    # Result: max 30s lag between a track change on Spotify and the widget
+    # reflecting it on the README.
+    resp.headers["Cache-Control"] = (
+        "public, max-age=30, s-maxage=30, stale-while-revalidate=60"
+    )
+    resp.headers["CDN-Cache-Control"] = "max-age=30, stale-while-revalidate=60"
 
     return resp
 
