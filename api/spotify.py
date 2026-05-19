@@ -194,6 +194,38 @@ def _api_get(url: str, retry_on_auth_error: bool = True) -> dict[str, Any]:
         raise APIError("Spotify", 0, str(e)) from e
 
 
+def get_artist(artist_id: str) -> Optional[dict[str, Any]]:
+    """
+    Fetch artist info (name + images) from Spotify's public artist endpoint.
+
+    Returns a dict with `name` and `image_url` (best-resolution available),
+    or None on any failure. We swallow exceptions because the promo card has
+    a graceful fallback path — better to render a generic CTA than to crash
+    the widget endpoint when /v1/artists is briefly flaky.
+
+    Used by the not-playing promo card to show the user's own artist photo
+    instead of a generic green play button.
+    """
+    if not artist_id:
+        return None
+    try:
+        data = _api_get(f"https://api.spotify.com/v1/artists/{artist_id}")
+        images = data.get("images") or []
+        # Spotify returns images sorted largest-first; pick a mid-size (~300px)
+        # if available so we get a sharper render without huge base64 payloads.
+        image_url = None
+        for img in images:
+            if (img.get("width") or 0) >= 200:
+                image_url = img.get("url")
+                break
+        if not image_url and images:
+            image_url = images[0].get("url")
+        return {"name": data.get("name"), "image_url": image_url}
+    except Exception as e:
+        print(f"get_artist failed: {e}")
+        return None
+
+
 def get_recent_tracks(limit: int = 10) -> dict[str, Any]:
     """
     Fetch recent tracks from Spotify.

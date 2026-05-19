@@ -566,33 +566,41 @@ def get_active_service() -> Tuple[str, Any]:
 
 def make_promo_svg(background_color: str, border_color: str) -> str:
     """
-    Render a Spotify-branded "not playing" promo card.
+    Render a Spotify-branded "not playing" promo card with the user's artist image.
 
-    Shown when the user isn't currently streaming — instead of falling back to
-    a stale "Recently played" widget that looks like an active track, we render
-    a clean CTA pointing viewers at the artist profile. Dimensions match the
-    regular widget so it slots in identically inside the README's image slot.
+    Shown when the user isn't currently streaming. We fetch the artist's
+    profile photo from Spotify's public /v1/artists/{id} endpoint (cached
+    in-process by the spotify module's token manager) and embed it as
+    base64 directly in the SVG — that way there are no external image
+    references for camo to break.
 
-    The card is intentionally simple SVG (no album-art fetch, no colour-thief)
-    so it renders fast and stays light — every visit when the user isn't
-    listening goes through this code path.
+    Layout:
+       [circular artist photo]   ARTIST NAME (big, white)
+                                 Not vibing right now (small, muted)
+                                                              ▶ Listen on Spotify
+       (subtle purple→green gradient sweep across the background bottom edge)
+
+    Fallback: if PROMO_ARTIST_ID isn't set or Spotify is unreachable, we
+    render the previous "play button + Currently chilling" layout — same
+    code path, just substitutes the green play glyph for the artist photo.
     """
+    # Local import avoids a top-of-module circular dep with spotify.py which
+    # transitively imports from this orchestrator for the make_svg helpers.
+    from . import spotify as spotify_mod
+
     width = svg_config.width
     height = svg_config.height
     radius = svg_config.border_radius
 
-    # Spotify brand colours, used as accent only — main background respects the
-    # caller-provided color so the card still blends with the README theme.
     spotify_green = "#1DB954"
     text_main = "#E6EDF3"
     text_muted = "#9CA3AF"
+    purple_accent = "#A371F7"  # site brand accent, used for the gradient
 
-    # Geometry: a circular play button on the left (avatar-sized), then two
-    # lines of text + a faux CTA button on the right.
     art_size = svg_config.album_art_size
     art_cx = svg_config.widget_padding_left + svg_config.widget_border_width + art_size / 2
     art_cy = height / 2
-    play_r = art_size / 2 - 4
+    art_r = art_size / 2 - 2
 
     text_x = (
         svg_config.widget_padding_left
@@ -600,38 +608,101 @@ def make_promo_svg(background_color: str, border_color: str) -> str:
         + art_size
         + svg_config.art_content_gap
     )
-    title_y = height / 2 - 8
-    subtitle_y = height / 2 + 16
 
-    # Triangular play glyph inscribed inside the green circle.
-    tri_offset = play_r * 0.45
-    tri = (
-        f"M {art_cx - tri_offset * 0.6},{art_cy - tri_offset} "
-        f"L {art_cx - tri_offset * 0.6},{art_cy + tri_offset} "
-        f"L {art_cx + tri_offset},{art_cy} Z"
-    )
+    # Fetch artist info — env-var driven so the fork stays reusable.
+    artist_id = os.getenv("PROMO_ARTIST_ID", "").strip()
+    artist = spotify_mod.get_artist(artist_id) if artist_id else None
+    artist_name = (artist or {}).get("name") or "Yanuka Deneth"
+    image_url = (artist or {}).get("image_url")
 
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Listen on Spotify">
-  <!-- Card background: caller-provided colour with the Spotify-green border
-       to telegraph the destination platform. -->
+    # Try to inline the artist image as base64. If anything goes wrong,
+    # fall through to the green play-button visual.
+    art_inline = None
+    if image_url:
+        try:
+            r = requests.get(image_url, timeout=8, verify=False)
+            if r.ok:
+                mime = r.headers.get("content-type") or "image/jpeg"
+                b64 = b64encode(r.content).decode("ascii")
+                art_inline = f"data:{mime};base64,{b64}"
+        except Exception as e:
+            print(f"artist image fetch failed: {e}")
+
+    # The "art" block is either the artist photo (clipped to a circle) or
+    # the green play button as before. clip-path keeps the image circular
+    # without needing CSS — works in <img>-rendered SVG.
+    if art_inline:
+        art_block = (
+            f'<defs><clipPath id="ava"><circle cx="{art_cx}" cy="{art_cy}" r="{art_r}"/></clipPath></defs>'
+            f'<image href="{art_inline}" x="{art_cx - art_r}" y="{art_cy - art_r}" '
+            f'width="{art_r * 2}" height="{art_r * 2}" '
+            f'clip-path="url(#ava)" preserveAspectRatio="xMidYMid slice"/>'
+            f'<circle cx="{art_cx}" cy="{art_cy}" r="{art_r}" fill="none" stroke="{purple_accent}" stroke-width="2"/>'
+        )
+    else:
+        tri_offset = art_r * 0.45
+        tri = (
+            f"M {art_cx - tri_offset * 0.6},{art_cy - tri_offset} "
+            f"L {art_cx - tri_offset * 0.6},{art_cy + tri_offset} "
+            f"L {art_cx + tri_offset},{art_cy} Z"
+        )
+        art_block = (
+            f'<circle cx="{art_cx}" cy="{art_cy}" r="{art_r}" fill="{spotify_green}"/>'
+            f'<path d="{tri}" fill="#000000"/>'
+        )
+
+    # Vertical positions for the three text rows. Tweaked so the artist
+    # name sits above center, status text below it, and the CTA pinned to
+    # the bottom-right corner.
+    name_y = height / 2 - 14
+    status_y = height / 2 + 8
+    cta_y = height - 18
+    cta_x = width - svg_config.widget_padding_right - 12
+
+    # Bottom-edge gradient sweep: purple → spotify green. Adds visual
+    # interest without overpowering the content. Drawn as a thin bar
+    # along the very bottom of the card.
+    gradient_id = "promo-gradient"
+
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Listen to {artist_name} on Spotify">
+  <defs>
+    <linearGradient id="{gradient_id}" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="{purple_accent}" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="{spotify_green}" stop-opacity="0.9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Card background: dark, with a 1px purple border (site accent). -->
   <rect x="{svg_config.widget_border_width / 2}" y="{svg_config.widget_border_width / 2}"
         width="{width - svg_config.widget_border_width}" height="{height - svg_config.widget_border_width}"
         rx="{radius}" ry="{radius}"
-        fill="#{background_color}" stroke="{spotify_green}" stroke-width="{svg_config.widget_border_width}"/>
+        fill="#{background_color}" stroke="{purple_accent}" stroke-width="{svg_config.widget_border_width}"/>
 
-  <!-- Play button: green circle + black triangle. Visually identical to
-       Spotify's play affordance, instantly recognizable. -->
-  <circle cx="{art_cx}" cy="{art_cy}" r="{play_r}" fill="{spotify_green}"/>
-  <path d="{tri}" fill="#000000"/>
+  <!-- Bottom-edge gradient sweep. Inset from the rounded corners. -->
+  <rect x="{radius}" y="{height - 3}" width="{width - radius * 2}" height="2" fill="url(#{gradient_id})"/>
 
-  <!-- Main copy. Avoid "Not currently playing" framing — keeps it as a
-       positive CTA ("Listen") rather than a status report. -->
-  <text x="{text_x}" y="{title_y}"
+  <!-- Artist photo (or green play button fallback). -->
+  {art_block}
+
+  <!-- Artist name — big, bold, white. -->
+  <text x="{text_x}" y="{name_y}"
         font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
-        font-size="18" font-weight="700" fill="{text_main}">Currently chilling</text>
-  <text x="{text_x}" y="{subtitle_y}"
+        font-size="20" font-weight="800" fill="{text_main}">{artist_name}</text>
+
+  <!-- Status line. "Currently chilling" reads more positive than "Not playing". -->
+  <text x="{text_x}" y="{status_y}"
         font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
-        font-size="13" font-weight="500" fill="{text_muted}">Tap to listen to my music on Spotify  →</text>
+        font-size="12" font-weight="500" fill="{text_muted}">Currently chilling · explore my music below</text>
+
+  <!-- CTA pill: Spotify-green filled rounded rect with white play arrow + label.
+       Pinned to bottom-right so the eye lands on it after reading the name. -->
+  <g transform="translate({cta_x - 130}, {cta_y - 22})">
+    <rect width="142" height="28" rx="14" fill="{spotify_green}"/>
+    <path d="M 14,8 L 14,20 L 24,14 Z" fill="#000000"/>
+    <text x="32" y="19"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+          font-size="12" font-weight="700" fill="#000000">Listen on Spotify</text>
+  </g>
 </svg>"""
 
 
